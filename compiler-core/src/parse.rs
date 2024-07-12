@@ -125,6 +125,20 @@ impl Attributes {
     fn has_function_only(&self) -> bool {
         self.external_erlang.is_some() || self.external_javascript.is_some()
     }
+
+    fn has_external_for(&self, target: Target) -> bool {
+        match target {
+            Target::Erlang => self.external_erlang.is_some(),
+            Target::JavaScript => self.external_javascript.is_some(),
+        }
+    }
+
+    fn set_external_for(&mut self, target: Target, ext: Option<(EcoString, EcoString)>) {
+        match target {
+            Target::Erlang => self.external_erlang = ext,
+            Target::JavaScript => self.external_javascript = ext,
+        }
+    }
 }
 
 //
@@ -1190,12 +1204,15 @@ where
 
                 let mut elements_after_tail = None;
                 let mut dot_dot_location = None;
-                let tail = if let Some((start, Token::DotDot, end)) = self.tok0 {
-                    dot_dot_location = Some((start, end));
-                    if !elements_end_with_comma {
+                let tail = if let Some((dot_dot_start, Token::DotDot, dot_dot_end)) = self.tok0 {
+                    dot_dot_location = Some((dot_dot_start, dot_dot_end));
+                    if !elements.is_empty() && !elements_end_with_comma {
                         self.warnings
                             .push(DeprecatedSyntaxWarning::DeprecatedListPattern {
-                                location: SrcSpan { start, end },
+                                location: SrcSpan {
+                                    start: dot_dot_start,
+                                    end: dot_dot_end,
+                                },
                             });
                     }
 
@@ -1257,6 +1274,13 @@ where
                     // No tail specified
                     None => None,
                 };
+
+                if elements.is_empty() && tail.as_ref().is_some_and(|p| p.is_discard()) {
+                    self.warnings
+                        .push(DeprecatedSyntaxWarning::DeprecatedListCatchAllPattern {
+                            location: SrcSpan { start, end: rsqb_e },
+                        })
+                }
 
                 Pattern::List {
                     location: SrcSpan { start, end },
@@ -3139,37 +3163,25 @@ where
     ) -> Result<u32, ParseError> {
         let (_, name, _) = self.expect_name()?;
 
-        match name.as_str() {
-            "erlang" => {
-                let _ = self.expect_one(&Token::Comma)?;
-                let (_, module, _) = self.expect_string()?;
-                let _ = self.expect_one(&Token::Comma)?;
-                let (_, function, _) = self.expect_string()?;
-                let _ = self.maybe_one(&Token::Comma);
-                let (_, end) = self.expect_one(&Token::RightParen)?;
-                if attributes.external_erlang.is_some() {
-                    return parse_error(ParseErrorType::DuplicateAttribute, SrcSpan { start, end });
-                }
-                attributes.external_erlang = Some((module, function));
-                Ok(end)
-            }
+        let target = match name.as_str() {
+            "erlang" => Target::Erlang,
+            "javascript" => Target::JavaScript,
+            _ => return parse_error(ParseErrorType::UnknownAttribute, SrcSpan::new(start, end)),
+        };
 
-            "javascript" => {
-                let _ = self.expect_one(&Token::Comma)?;
-                let (_, module, _) = self.expect_string()?;
-                let _ = self.expect_one(&Token::Comma)?;
-                let (_, function, _) = self.expect_string()?;
-                let _ = self.maybe_one(&Token::Comma);
-                let _ = self.expect_one(&Token::RightParen)?;
-                if attributes.external_javascript.is_some() {
-                    return parse_error(ParseErrorType::DuplicateAttribute, SrcSpan { start, end });
-                }
-                attributes.external_javascript = Some((module, function));
-                Ok(end)
-            }
+        let _ = self.expect_one(&Token::Comma)?;
+        let (_, module, _) = self.expect_string()?;
+        let _ = self.expect_one(&Token::Comma)?;
+        let (_, function, _) = self.expect_string()?;
+        let _ = self.maybe_one(&Token::Comma);
+        let (_, end) = self.expect_one(&Token::RightParen)?;
 
-            _ => parse_error(ParseErrorType::UnknownAttribute, SrcSpan::new(start, end)),
+        if attributes.has_external_for(target) {
+            return parse_error(ParseErrorType::DuplicateAttribute, SrcSpan { start, end });
         }
+
+        attributes.set_external_for(target, Some((module, function)));
+        Ok(end)
     }
 
     fn parse_deprecated_attribute(
