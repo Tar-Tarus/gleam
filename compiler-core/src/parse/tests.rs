@@ -1036,6 +1036,43 @@ type A {
     );
 }
 
+// Tests whether diagnostic presents an example of how to formulate a proper
+// record constructor based off a common user error pattern.
+// https://github.com/gleam-lang/gleam/issues/3324
+
+#[test]
+fn type_invalid_record_constructor() {
+    assert_module_error!(
+        "
+pub type User {
+    name: String,
+}
+"
+    );
+}
+
+#[test]
+fn type_invalid_record_constructor_without_field_type() {
+    assert_module_error!(
+        "
+pub opaque type User {
+    name
+}
+"
+    );
+}
+
+#[test]
+fn type_invalid_record_constructor_invalid_field_type() {
+    assert_module_error!(
+        r#"
+type User {
+    name: "Test User",
+}
+"#
+    );
+}
+
 #[test]
 fn type_invalid_type_name() {
     assert_module_error!(
@@ -1132,6 +1169,22 @@ const a = A(\"a\", let)
     );
 }
 
+// record access should parse even if there is no label written
+#[test]
+fn record_access_no_label() {
+    assert_parse_module!(
+        "
+type Wibble {
+    Wibble(wibble: String)
+}
+
+fn wobble() {
+  Wibble(\"a\").
+}
+"
+    );
+}
+
 #[test]
 fn newline_tokens() {
     assert_eq!(
@@ -1154,5 +1207,57 @@ fn arithmetic_in_guards() {
 case 2, 3 {
     x, y if x + y == 1 -> True
 }"
+    );
+}
+
+#[test]
+fn const_string_concat() {
+    assert_parse_module!(
+        "
+const cute = \"cute\"
+const cute_bee = cute <> \"bee\"
+"
+    );
+}
+
+#[test]
+fn const_string_concat_naked_right() {
+    assert_module_error!(
+        "
+const no_cute_bee = \"cute\" <>
+"
+    );
+}
+
+#[test]
+fn function_call_in_case_clause_guard() {
+    assert_error!(
+        r#"
+let my_string = "hello"
+case my_string {
+    _ if length(my_string) > 2 -> io.debug("doesn't work')
+}"#
+    );
+}
+
+#[test]
+fn dot_access_function_call_in_case_clause_guard() {
+    assert_error!(
+        r#"
+let my_string = "hello"
+case my_string {
+    _ if string.length(my_string) > 2 -> io.debug("doesn't work')
+}"#
+    );
+}
+
+#[test]
+fn invalid_left_paren_in_case_clause_guard() {
+    assert_error!(
+        r#"
+let my_string = "hello"
+case my_string {
+    _ if string.length( > 2 -> io.debug("doesn't work')
+}"#
     );
 }

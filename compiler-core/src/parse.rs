@@ -795,10 +795,19 @@ where
                     }
 
                     t0 => {
+                        // parse a field access with no label
                         self.tok0 = t0;
-                        return self.next_tok_unexpected(vec![
-                            "A positive integer or a field name.".into(),
-                        ]);
+                        let end = dot_start + 1;
+                        expr = UntypedExpr::FieldAccess {
+                            location: SrcSpan { start, end },
+                            label_location: SrcSpan {
+                                start: dot_start,
+                                end,
+                            },
+                            label: "".into(),
+                            container: Box::new(expr),
+                        };
+                        return Ok(Some(expr));
                     }
                 }
             } else if self.maybe_one(&Token::LeftParen).is_some() {
@@ -1310,6 +1319,13 @@ where
         }
     }
 
+    fn add_multi_line_clause_hint(&self, mut err: ParseError) -> ParseError {
+        if let ParseErrorType::UnexpectedToken { ref mut hint, .. } = err.error {
+            *hint = Some("Did you mean to wrap a multi line clause in curly braces?".into());
+        }
+        err
+    }
+
     // examples:
     //   pattern -> expr
     //   pattern, pattern if -> expr
@@ -1325,13 +1341,9 @@ where
                 alternative_patterns.push(self.parse_patterns()?);
             }
             let guard = self.parse_case_clause_guard(false)?;
-            let (arr_s, arr_e) = self.expect_one(&Token::RArrow).map_err(|mut e| {
-                if let ParseErrorType::UnexpectedToken { ref mut hint, .. } = e.error {
-                    *hint =
-                        Some("Did you mean to wrap a multi line clause in curly braces?".into());
-                }
-                e
-            })?;
+            let (arr_s, arr_e) = self
+                .expect_one(&Token::RArrow)
+                .map_err(|e| self.add_multi_line_clause_hint(e))?;
             let then = self.parse_expression()?;
             if let Some(then) = then {
                 Ok(Some(Clause {
@@ -1420,6 +1432,34 @@ where
         }
     }
 
+    /// Checks if we have an unexpected left parenthesis and returns appropriate
+    /// error if it is a function call.
+    fn parse_function_call_in_clause_guard(&mut self, start: u32) -> Result<(), ParseError> {
+        if let Some((l_paren_start, l_paren_end)) = self.maybe_one(&Token::LeftParen) {
+            if let Ok((_, end)) = self
+                .parse_fn_args()
+                .and(self.expect_one(&Token::RightParen))
+            {
+                return parse_error(ParseErrorType::CallInClauseGuard, SrcSpan { start, end });
+            }
+
+            return parse_error(
+                ParseErrorType::UnexpectedToken {
+                    token: Token::LeftParen,
+                    expected: vec![Token::RArrow.to_string().into()],
+                    hint: None,
+                },
+                SrcSpan {
+                    start: l_paren_start,
+                    end: l_paren_end,
+                },
+            )
+            .map_err(|e| self.add_multi_line_clause_hint(e));
+        }
+
+        Ok(())
+    }
+
     // examples
     // a
     // 1
@@ -1453,6 +1493,8 @@ where
                     name,
                 };
 
+                self.parse_function_call_in_clause_guard(start)?;
+
                 loop {
                     let dot_s = match self.maybe_one(&Token::Dot) {
                         Some((dot_s, _)) => dot_s,
@@ -1481,6 +1523,8 @@ where
                         }
 
                         Some((_, Token::Name { name: label }, int_e)) => {
+                            self.parse_function_call_in_clause_guard(start)?;
+
                             unit = ClauseGuard::FieldAccess {
                                 location: SrcSpan {
                                     start: dot_s,
@@ -1935,8 +1979,7 @@ where
                 // No separator
                 None,
             )?;
-            let (_, close_end) =
-                self.expect_one_following_series(&Token::RightBrace, "a record constructor")?;
+            let (_, close_end) = self.expect_custom_type_close(&name, public, opaque)?;
             (constructors, close_end)
         } else if let Some((eq_s, eq_e)) = self.maybe_one(&Token::Equal) {
             // Type Alias
@@ -2397,7 +2440,17 @@ where
     //   "hi"
     //   True
     //   [1,2,3]
+    //   foo <> "bar"
     fn parse_const_value(&mut self) -> Result<Option<UntypedConstant>, ParseError> {
+        let constant_result = self.parse_const_value_unit();
+        if let Ok(Some(constant)) = constant_result {
+            self.parse_const_maybe_concatenation(constant)
+        } else {
+            constant_result
+        }
+    }
+
+    fn parse_const_value_unit(&mut self) -> Result<Option<UntypedConstant>, ParseError> {
         match self.tok0.take() {
             Some((start, Token::String { value }, end)) => {
                 self.advance();
@@ -2548,6 +2601,40 @@ where
             t0 => {
                 self.tok0 = t0;
                 Ok(None)
+            }
+        }
+    }
+
+    fn parse_const_maybe_concatenation(
+        &mut self,
+        left: UntypedConstant,
+    ) -> Result<Option<UntypedConstant>, ParseError> {
+        match self.tok0.take() {
+            Some((op_start, Token::LtGt, op_end)) => {
+                self.advance();
+
+                if let Ok(Some(right_constant_value)) = self.parse_const_value() {
+                    Ok(Some(Constant::StringConcatenation {
+                        location: SrcSpan {
+                            start: left.location().start,
+                            end: right_constant_value.location().end,
+                        },
+                        left: Box::new(left),
+                        right: Box::new(right_constant_value),
+                    }))
+                } else {
+                    parse_error(
+                        ParseErrorType::OpNakedRight,
+                        SrcSpan {
+                            start: op_start,
+                            end: op_end,
+                        },
+                    )
+                }
+            }
+            t0 => {
+                self.tok0 = t0;
+                Ok(Some(left))
             }
         }
     }
@@ -2818,6 +2905,59 @@ where
         match self.maybe_one(wanted) {
             Some((start, end)) => Ok((start, end)),
             None => self.next_tok_unexpected(vec![wanted.to_string().into(), series.into()]),
+        }
+    }
+
+    /// Expect the end to a custom type definiton or handle an incorrect
+    /// record constructor definition.
+    ///
+    /// Used for mapping to a more specific error type and message.
+    fn expect_custom_type_close(
+        &mut self,
+        name: &EcoString,
+        public: bool,
+        opaque: bool,
+    ) -> Result<(u32, u32), ParseError> {
+        match self.maybe_one(&Token::RightBrace) {
+            Some((start, end)) => Ok((start, end)),
+            None => match self.next_tok() {
+                None => parse_error(ParseErrorType::UnexpectedEof, SrcSpan { start: 0, end: 0 }),
+                Some((start, token, end)) => {
+                    // If provided a Name, map to a more detailed error
+                    // message to nudge the user.
+                    // Else, handle as an unexpected token.
+                    let field = match token {
+                        Token::Name { name } => name,
+                        _ => {
+                            return parse_error(
+                                ParseErrorType::UnexpectedToken {
+                                    token,
+                                    expected: vec![
+                                        Token::RightBrace.to_string().into(),
+                                        "a record constructor".into(),
+                                    ],
+                                    hint: None,
+                                },
+                                SrcSpan { start, end },
+                            )
+                        }
+                    };
+                    let field_type = match self.parse_type_annotation(&Token::Colon) {
+                        Ok(Some(annotation)) => Some(annotation),
+                        _ => None,
+                    };
+                    parse_error(
+                        ParseErrorType::ExpectedRecordConstructor {
+                            name: name.clone(),
+                            public,
+                            opaque,
+                            field,
+                            field_type,
+                        },
+                        SrcSpan { start, end },
+                    )
+                }
+            },
         }
     }
 
