@@ -245,11 +245,8 @@ enum Command {
     Export(ExportTarget),
 }
 
-fn template_doc() -> String {
-    format!(
-        "The template to use ({})",
-        new::Template::VARIANTS.join("|")
-    )
+fn template_doc() -> &'static str {
+    "The template to use"
 }
 
 fn target_doc() -> String {
