@@ -8,6 +8,11 @@
   platform for the generated documentation.
   ([Jiangda Wang](https://github.com/frank-iii))
 
+- `gleam new` now takes an optional `--template` flag (with options `erlang`
+  and `javascript`) to specify the template and target for the generated
+  project.
+  ([Mohammed Khouni](https://github.com/Tar-Tarus)
+
 ### Compiler
 
 - The warning for the deprecated `[..]` pattern has been improved.
